@@ -1,0 +1,160 @@
+---
+always_allow_html: yes
+classoption: a4paper, oneside
+documentclass: report
+fontsize: 12pt
+fonttheme: structurebold
+geometry: margin=1in
+header-includes:
+- \usepackage{lmodern}
+- \usepackage{amsmath}
+- \usepackage{bbm}
+- \usepackage[english]{babel}
+- \usepackage{sectsty}
+- \usepackage{titlesec}
+- \usepackage{longtable}
+- \usepackage{fancyhdr}
+output:
+  html_document:
+    df_print: paged
+  pdf_document: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## XGBoost with Cancer Dataset
+
+```{r datasetup, include=F}
+require(xgboost)
+require(DiagrammeR)
+library(Matrix)
+data <- read.csv("C:/Users/je116/OneDrive - Imperial College London/ICTU Work/Training/Methods/Targeted Learning/Data/datasets_180_408_data.csv")
+final <- subset(data, select=-id:-diagnosis)
+xvars <- subset(final, select=-X)
+outcome <- as.factor(data$diagnosis)
+
+```
+
+This is a one page summary of the results from running the XGBoost classifier on the cancer dataset. In which `r nrow(data)` tumours have been analysed. The diagnosis (Melginant or Benign) of each is known and there are a list of other clinical measurements that we hope to use to predict the diagnosis. 
+
+The full list of predictor variables is:
+
+`r colnames(xvars)`
+
+###### Libraries required for this project:
+* `XGBoost`
+* `DiagrammeR`
+* `Matrix`
+
+### Setup
+
+To analyse this data we first need to split the dataset into training and testing, usually training is made from 70% of the data with testing at 30%. Below the `sample` function allows us to randomly sample the dataset. By setting the seed we can ensure repeatability in this process.
+
+``` {r traintest, include = TRUE}
+set.seed(1)
+train_obs <- sample(floor(0.7 * nrow(data))) 
+print(train_obs[1:10])
+```
+
+This provides us with random rows of the data to ensure there is no biased in training or test datasets. We can the split our outcome and predictor variables into the two datasets using the chosen row IDs from `train_obs`. 
+
+``` {r splitdata, include=FALSE}
+x_train <- xvars[train_obs, ] 
+x_test <- xvars[-train_obs, ]
+
+y_train = ifelse(outcome[train_obs]=="M",1,0)
+y_test = ifelse(outcome[-train_obs]=="M",1,0)
+
+xtrain <- Matrix(as.matrix(x_train), sparse = TRUE)
+ytrain <- Matrix(as.matrix(y_train), sparse = TRUE)
+
+xtest <- Matrix(as.matrix(x_test), sparse = TRUE)
+ytest <- Matrix(as.matrix(y_test), sparse = TRUE)
+
+
+```
+
+### The Model
+
+Firstly it should be noted that to `data.frame` is not a type allowed in XGBoost, therefore dataframes need to be converted to matricies. The `Matrix` library is a very each way to do this, which even includes an option to make the matrix sparse (increases speed). 
+
+Implementing the `XGBoost` function is very straightforward, we simply provide the function with the name of the X and Y training data. We then need to also decide on the tuning of the `hyperparameters'. 
+
+##### These are:
+* `max.depth` = How many levels of the deicsion tree should there be
+* `eta` = learning rate, how large should the optimising steps by
+* `nthred` = Parallel computing to solve faster
+* `nrounds` = How many passes through the data should occur, more rounds leads to more trees.
+* `objective` = Defining the classification problem, here "binary:logistic" is used as diagnosis is binary and we wish to use logistic regression for our classifier.
+
+
+``` {r xgboost, include = TRUE}
+
+# Train the Data
+bstSparse <- xgboost(data = xtrain, label = ytrain, # Label = Outcome 
+                     max.depth = 4, eta = 0.5, nthread = 2, nrounds = 2, objective = "binary:logistic")
+
+```
+
+In our results we get two training errors, this is because the parameter `nrounds` was specified as 2. The lower error means XGBoost has strong classification of this dataset. 
+
+### Predictions from XGBoost
+
+Now we can use the predictions from our model (`bstSparse`) to calulate how well it performs on the test data. First we provide the test dataset (`xtest`), then convert the predicted probabilties to be binary. Our error is then calculated as the mean number of incorrect predictions of the diasnosis in our test data.
+
+``` {r predictions, include = TRUE}
+
+pred <- predict(bstSparse, xtest) ## predict the outcome using the train outcome
+print(head(pred)) # Not Binary!! 
+prediction <- as.numeric(pred > 0.5) # Convert to Binary
+print(head(prediction))
+
+err <- mean(as.numeric(pred > 0.5) != ytest) # Mean number of incorrect predictions
+print(paste("test-error=", err))
+
+```
+
+Our testing error is low, this means there is good internal validity of our model and gives good indication that our model hasn't overfitted to our training data.
+
+### Visualising the Results
+
+Before visualising the results, it's important to know how to interpret the outcome. With decision trees there are three main parameters to understand. 
+
+##### There are:
+1. The **Gain** implies the relative contribution of the corresponding feature to the model calculated by taking each feature's contribution for each tree in the model. A higher value of this metric when compared to another feature implies it is more important for generating a prediction.
+2. The **Cover** metric means the relative number of observations related to this feature. For example, if you have 100 observations, 4 features and 3 trees, and suppose feature1 is used to decide the leaf node for 10, 5, and 2 observations in tree1, tree2 and tree3 respectively; then the metric will count cover for this feature as 10+5+2 = 17 observations. This will be calculated for all the 4 features and the cover will be 17 expressed as a percentage for all features' cover metrics.
+3. The **Frequency** is the percentage representing the relative number of times a particular feature occurs in the trees of the model. In the above example, if feature1 occurred in 2 splits, 1 split and 3 splits in each of tree1, tree2 and tree3; then the weightage for feature1 will be 2+1+3 = 6. The frequency for feature1 is calculated as its percentage weight over weights of all features.
+
+#### Importance Matrix
+
+This provides use a detailed view of how much each predictor variable contributed to our model. 
+
+``` {r importance, include=TRUE}
+
+importance_matrix <- xgb.importance(model = bstSparse)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+```
+
+##### Decision Tree
+
+``` {r decisiontree, include = FALSE}
+
+# Reset Results
+xgb.dump(bstSparse, with_stats = TRUE)
+
+```
+
+Using the `xgb.plot.tree` function, we are able to view into the 2 decision trees made from each round of the data. 
+
+``` {r visualtree, include = TRUE}
+xgb.plot.tree(model = bstSparse)
+
+# Detailed view of tree
+xgb.model.dt.tree(xtrain@Dimnames[[2]], model = bstSparse)
+
+```
